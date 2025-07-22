@@ -70,6 +70,14 @@ else()
     message(STATUS "OTP Application: \t\t disabled")
 endif(ENABLE_OTP_APP)
 
+option(ENABLE_CUSTOM_RGB_LED "Enable/disable custom RGB LED driver" ON)
+if(ENABLE_CUSTOM_RGB_LED)
+    add_definitions(-DCUSTOM_RGB_LED=1)
+    message(STATUS "Custom RGB LED Driver: \t enabled")
+else()
+    message(STATUS "Custom RGB LED Driver: \t disabled")
+endif(ENABLE_CUSTOM_RGB_LED)
+
 if(ENABLE_OTP_APP OR ENABLE_OATH_APP)
     set(USB_ITF_CCID 1)
     set(USB_ITF_WCID 1)
@@ -167,3 +175,6 @@ target_link_libraries(pico_fido PRIVATE pico_keys_sdk pico_stdlib pico_multicore
 pico_add_extra_outputs(${CMAKE_PROJECT_NAME})
 endif()
 endif()
+
+pico_enable_stdio_usb(pico_fido 1)
+pico_enable_stdio_uart(pico_fido 0)

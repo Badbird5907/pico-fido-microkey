@@ -37,6 +37,8 @@
 #include "version.h"
 #include "crypto_utils.h"
 #include "otp.h"
+#include "pico/stdlib.h" // Add for GPIO/ADC functions
+#include "hardware/adc.h" // Add for ADC functions
 
 int fido_process_apdu();
 int fido_unload();
@@ -254,7 +256,6 @@ int derive_key(const uint8_t *app_id, bool new_key, uint8_t *key_handle, int cur
     int r = 0;
     memset(outk, 0, sizeof(outk));
     if ((r = load_keydev(outk)) != PICOKEY_OK) {
-        printf("Error loading keydev: %d\n", r);
         return r;
     }
     const mbedtls_md_info_t *md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA512);
@@ -311,7 +312,6 @@ int scan_files_fido() {
     ef_mkek = search_by_fid(EF_MKEK, NULL, SPECIFY_EF);
     if (ef_keydev) {
         if (!file_has_data(ef_keydev) && !file_has_data(ef_keydev_enc)) {
-            printf("KEY DEVICE is empty. Generating SECP256R1 curve...");
             mbedtls_ecdsa_context ecdsa;
             mbedtls_ecdsa_init(&ecdsa);
             uint8_t index = 0;
@@ -335,11 +335,9 @@ int scan_files_fido() {
             if (ret != PICOKEY_OK) {
                 return ret;
             }
-            printf(" done!\n");
         }
     }
     else {
-        printf("FATAL ERROR: KEY DEV not found in memory!\r\n");
     }
     if (ef_mkek) { // No encrypted MKEK
         if (!file_has_data(ef_mkek)) {
@@ -349,12 +347,10 @@ int scan_files_fido() {
             int ret = aes_encrypt_cfb_256(MKEK_KEY(mkek), MKEK_IV(mkek), file_get_data(ef_keydev), 32);
             mbedtls_platform_zeroize(mkek, sizeof(mkek));
             if (ret != 0) {
-                printf("FATAL ERROR: MKEK encryption failed!\r\n");
             }
         }
     }
     else {
-        printf("FATAL ERROR: MKEK not found in memory!\r\n");
     }
     ef_certdev = search_by_fid(EF_EE_DEV, NULL, SPECIFY_EF);
     if (ef_certdev) {
@@ -386,7 +382,6 @@ int scan_files_fido() {
         }
     }
     else {
-        printf("FATAL ERROR: CERT DEV not found in memory!\r\n");
     }
     ef_counter = search_by_fid(EF_COUNTER, NULL, SPECIFY_EF);
     if (ef_counter) {
@@ -396,7 +391,6 @@ int scan_files_fido() {
         }
     }
     else {
-        printf("FATAL ERROR: Global counter not found in memory!\r\n");
     }
     ef_pin = search_by_fid(EF_PIN, NULL, SPECIFY_EF);
     if (file_get_size(ef_pin) == 18) { // Upgrade PIN storage
@@ -417,7 +411,6 @@ int scan_files_fido() {
         paut.len = file_get_size(ef_authtoken);
     }
     else {
-        printf("FATAL ERROR: Auth Token not found in memory!\r\n");
     }
     ef_largeblob = search_by_fid(EF_LARGEBLOB, NULL, SPECIFY_EF);
     if (!file_has_data(ef_largeblob)) {
@@ -434,20 +427,68 @@ void scan_all() {
 }
 
 extern void init_otp();
+#define TOUCH_PIN 12
+
+static int touch_baseline = 0;
+static const int touch_threshold = 10;
+
+static int capacitive_sense(int pin) {
+    gpio_set_dir(pin, GPIO_OUT);
+    gpio_put(pin, 0);
+    sleep_us(10);
+    gpio_set_dir(pin, GPIO_IN);
+    gpio_pull_up(pin);
+    int count = 0;
+    const int timeout = 10000;
+    while (gpio_get(pin) == 0 && count < timeout) {
+        count++;
+    }
+    if (count >= timeout) return 0;
+    return count;
+}
+
+static void init_touch() {
+    gpio_init(TOUCH_PIN);
+    gpio_pull_up(TOUCH_PIN);
+    gpio_set_dir(TOUCH_PIN, GPIO_IN);
+    
+    // get a baseline
+    int sum = 0;
+    for (int i = 0; i < 10; i++) {
+        int v = capacitive_sense(TOUCH_PIN);
+        sum += v;
+        sleep_ms(50);
+    }
+    touch_baseline = sum / 10;
+    if (touch_baseline < 10) touch_baseline = 10; // minimum baseline
+}
+
 void init_fido() {
+    init_touch();
     scan_all();
     init_otp();
 }
 
 bool wait_button_pressed() {
-    uint32_t val = EV_PRESS_BUTTON;
-#ifndef ENABLE_EMULATION
-    queue_try_add(&card_to_usb_q, &val);
-    do {
-        queue_remove_blocking(&usb_to_card_q, &val);
-    } while (val != EV_BUTTON_PRESSED && val != EV_BUTTON_TIMEOUT);
-#endif
-    return val == EV_BUTTON_TIMEOUT;
+    absolute_time_t start = get_absolute_time();
+    uint32_t led_mode = led_get_mode();
+    
+    led_set_mode(MODE_BUTTON);
+
+    while (absolute_time_diff_us(start, get_absolute_time()) < 30000000) { // 30s timeout
+        int touchValue = capacitive_sense(TOUCH_PIN);
+        int difference = touchValue - touch_baseline;
+
+        if (difference > touch_threshold) {
+            led_set_mode(led_mode);
+            return false; // pressed
+        }
+
+        sleep_ms(10);
+    }
+
+    led_set_mode(MODE_NOT_MOUNTED);
+    return true; // timeout
 }
 
 uint32_t user_present_time_limit = 0;
@@ -522,3 +563,4 @@ int fido_process_apdu() {
     }
     return SW_INS_NOT_SUPPORTED();
 }
+
